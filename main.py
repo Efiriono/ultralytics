@@ -3,6 +3,7 @@ from ultralytics import YOLO
 import random
 import os
 import logging
+import json
 
 list_point_names = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder",
                     "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist",
@@ -19,9 +20,7 @@ point_pairs = [
     (12, 14), (14, 16)  # Нога правая
 ]
 
-
-def process_video_with_tracking(model, input_video_path, person_id, output_dir="results", show_video=False,
-                                save_video=True):
+def process_video_with_tracking(model, input_video_path, output_dir="results", show_video=False, save_video=True):
     # Настройка логирования
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -30,8 +29,7 @@ def process_video_with_tracking(model, input_video_path, person_id, output_dir="
         os.makedirs(output_dir)
 
     output_video_path = os.path.join(output_dir, "output_video.mp4")
-    coordinates_file_path = os.path.join(output_dir, "coordinates.txt")
-    frames_file_path = os.path.join(output_dir, "frames.txt")
+    json_file_path = os.path.join(output_dir, "coordinates.json")
 
     # Открытие входного видеофайла
     cap = cv2.VideoCapture(input_video_path)
@@ -49,96 +47,63 @@ def process_video_with_tracking(model, input_video_path, person_id, output_dir="
         out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
 
     frame_number = 0
-    last_keypoints = None
+    data = {}
 
-    with open(coordinates_file_path, 'w') as coord_file, open(frames_file_path, 'w') as frames_file:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-            results = model.track(frame, iou=0.6, conf=0.5, persist=True, imgsz=608, verbose=False,
-                                  tracker="botsort.yaml")
+        results = model.track(frame, iou=0.6, conf=0.5, persist=True, imgsz=608, verbose=False,
+                              tracker="botsort.yaml")
 
-            if results[0].boxes.id is not None:  # Проверяем, что id не None -> существуют треки
-                ids = results[0].boxes.id.cpu().numpy().astype(int)
-                keypoints_all = results[0].keypoints.xy.cpu().numpy()
+        if results[0].boxes.id is not None:  # Проверяем, что id не None -> существуют треки
+            ids = results[0].boxes.id.cpu().numpy().astype(int)
+            keypoints_all = results[0].keypoints.xy.cpu().numpy()
 
-                # Найти bounding box с заданным ID
-                person_index = None
-                for i, id in enumerate(ids):
-                    if id == person_id:
-                        person_index = i
-                        break
+            for person_index, person_id in enumerate(ids):
+                person_id = int(person_id)  # Преобразуем numpy.int32 в стандартный int
+                keypoints = keypoints_all[person_index]
+                if person_id not in data:
+                    data[person_id] = {}
+                data[person_id][frame_number] = {list_point_names[i]: (int(x), int(y)) for i, (x, y) in enumerate(keypoints)}
 
-                if person_index is not None:
-                    keypoints = keypoints_all[person_index]
-                    last_keypoints = keypoints
+                # Генерация случайного цвета для объекта на основе его ID
+                random.seed(person_id)
+                color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
-                    # Генерация случайного цвета для объекта на основе его ID
-                    random.seed(int(person_id))
-                    color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+                # Рисуем точки
+                for j, point in enumerate(keypoints):
+                    x, y = point
+                    if x > 0 and y > 0:  # Проверяем, что обе координаты больше нуля
+                        cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 255), -1)
 
-                    # Рисуем точки
-                    for j, point in enumerate(keypoints):
-                        x, y = point
-                        if x > 0 and y > 0:  # Проверяем, что обе координаты больше нуля
-                            cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 255), -1)
+                # Соединяем точки линиями
+                for pair in point_pairs:
+                    start, end = pair
+                    if keypoints[start][0] > 0 and keypoints[start][1] > 0 and keypoints[end][0] > 0 and \
+                            keypoints[end][1] > 0:  # Проверяем, что обе пары координат больше нуля
+                        x1, y1 = int(keypoints[start][0]), int(keypoints[start][1])
+                        x2, y2 = int(keypoints[end][0]), int(keypoints[end][1])
+                        cv2.line(frame, (x1, y1), (x2, y2), color, 2)
 
-                    # Соединяем точки линиями
-                    for pair in point_pairs:
-                        start, end = pair
-                        if keypoints[start][0] > 0 and keypoints[start][1] > 0 and keypoints[end][0] > 0 and \
-                                keypoints[end][1] > 0:  # Проверяем, что обе пары координат больше нуля
-                            x1, y1 = int(keypoints[start][0]), int(keypoints[start][1])
-                            x2, y2 = int(keypoints[end][0]), int(keypoints[end][1])
-                            cv2.line(frame, (x1, y1), (x2, y2), color, 2)
+        # Логирование номера текущего кадра
+        logging.info(f"Processing frame {frame_number}")
 
-                    # Запись координат в файл
-                    coord_file.write(
-                        f"Frame {frame_number}: " + ", ".join([f"({int(x)}, {int(y)})" for x, y in keypoints]) + "\n")
-                else:
-                    if last_keypoints is not None:
-                        keypoints = last_keypoints
-                        # Генерация случайного цвета для объекта на основе его ID
-                        random.seed(int(person_id))
-                        color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        if save_video:
+            out.write(frame)
 
-                        # Рисуем точки
-                        for j, point in enumerate(keypoints):
-                            x, y = point
-                            if x > 0 and y > 0:  # Проверяем, что обе координаты больше нуля
-                                cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 255), -1)
+        if show_video:
+            cv2.imshow("frame", frame)
 
-                        # Соединяем точки линиями
-                        for pair in point_pairs:
-                            start, end = pair
-                            if keypoints[start][0] > 0 and keypoints[start][1] > 0 and keypoints[end][0] > 0 and \
-                                    keypoints[end][1] > 0:  # Проверяем, что обе пары координат больше нуля
-                                x1, y1 = int(keypoints[start][0]), int(keypoints[start][1])
-                                x2, y2 = int(keypoints[end][0]), int(keypoints[end][1])
-                                cv2.line(frame, (x1, y1), (x2, y2), color, 2)
+        if cv2.waitKey(int(1000 / fps)) & 0xFF == ord("q"):
+            break
 
-                        # Запись координат в файл
-                        coord_file.write(f"Frame {frame_number} (recovered): " + ", ".join(
-                            [f"({int(x)}, {int(y)})" for x, y in keypoints]) + "\n")
+        frame_number += 1
 
-            # Запись номера кадра и (n, 0) в другой файл
-            frames_file.write(f"({frame_number}, 0)\n")
-
-            # Логирование номера текущего кадра
-            logging.info(f"Processing frame {frame_number}")
-
-            if save_video:
-                out.write(frame)
-
-            if show_video:
-                cv2.imshow("frame", frame)
-
-            if cv2.waitKey(int(1000 / fps)) & 0xFF == ord("q"):
-                break
-
-            frame_number += 1
+    # Сохранение координат в JSON файл
+    with open(json_file_path, 'w') as json_file:
+        json.dump(data, json_file, indent=4)
 
     # Освобождение ресурсов
     cap.release()
@@ -147,18 +112,13 @@ def process_video_with_tracking(model, input_video_path, person_id, output_dir="
 
     cv2.destroyAllWindows()
 
-
 # Загрузка модели
 model = YOLO('yolov8m-pose.pt')
 
 # Принудительное использование CPU
 model.to('cpu')
 
-# ID человека для отслеживания
-person_id_to_track = 1  # Укажите здесь ID человека, которого нужно отслеживать
-
 # Запуск обработки видео
-process_video_with_tracking(model, "test_video.mp4", person_id=person_id_to_track, output_dir="results",
-                            show_video=False, save_video=True)
+process_video_with_tracking(model, "test_video.mp4", output_dir="results", show_video=False, save_video=True)
 
 print("Обработка завершена. Результаты сохранены в папке 'results'.")
